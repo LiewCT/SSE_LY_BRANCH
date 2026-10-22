@@ -795,9 +795,10 @@ def open_invoices():
         return jsonify({"error":"Packaging status database error.","details":str(error)}),500
 
 
+
 @app.route("/workflow", methods=["GET"])
 def get_workflow():
-    conn = sqlite3.connect(DATABASE_PATH)
+    conn = get_database_connection()
     try:
         cards = [
             dict(row)
@@ -832,18 +833,14 @@ def create_workflow_card():
     if not name:
         return jsonify({"error": "Card name is required."}), 400
 
-    conn = sqlite3.connect(DATABASE_PATH)
+    conn = get_database_connection()
     try:
         cursor = conn.execute(
             "INSERT INTO workflow_cards (name) VALUES (?)",
             (name,)
         )
         conn.commit()
-
-        return jsonify({
-            "id": cursor.lastrowid,
-            "name": name
-        }), 201
+        return jsonify({"id": cursor.lastrowid, "name": name}), 201
     except sqlite3.IntegrityError:
         return jsonify({"error": "A card with that name already exists."}), 409
     finally:
@@ -858,7 +855,7 @@ def rename_workflow_card(card_id):
     if not name:
         return jsonify({"error": "Card name is required."}), 400
 
-    conn = sqlite3.connect(DATABASE_PATH)
+    conn = get_database_connection()
     try:
         cursor = conn.execute("""
             UPDATE workflow_cards
@@ -880,7 +877,7 @@ def rename_workflow_card(card_id):
 
 @app.route("/workflow/cards/<int:card_id>", methods=["DELETE"])
 def delete_workflow_card(card_id):
-    conn = sqlite3.connect(DATABASE_PATH)
+    conn = get_database_connection()
     try:
         conn.execute("""
             UPDATE workflow_assignments
@@ -915,7 +912,7 @@ def update_workflow_assignment():
     if card_id == "":
         card_id = None
 
-    conn = sqlite3.connect(DATABASE_PATH)
+    conn = get_database_connection()
     try:
         if card_id is not None:
             try:
