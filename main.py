@@ -50,6 +50,32 @@ def initialize_database():
             connection.execute("ALTER TABLE packaging_status ADD COLUMN packed_quantity REAL NOT NULL DEFAULT 0")
             connection.execute("UPDATE packaging_status SET packed_quantity=CASE WHEN packaged=1 THEN last_quantity ELSE 0 END")
 
+
+def initialize_workflow_tables():
+    conn = get_database_connection()
+    try:
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS workflow_cards (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT NOT NULL COLLATE NOCASE UNIQUE,
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS workflow_assignments (
+                order_id TEXT PRIMARY KEY,
+                card_id INTEGER NULL,
+                updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (card_id) REFERENCES workflow_cards(id)
+            )
+        """)
+
+        conn.commit()
+    finally:
+        conn.close()
+
 def build_sse_session():
     session=requests.Session()
     session.cookies.set("ci_session",SSE_CI_SESSION,domain="ssegroup.com.my",path="/")
@@ -768,6 +794,161 @@ def open_invoices():
         app.logger.exception("Packaging database error")
         return jsonify({"error":"Packaging status database error.","details":str(error)}),500
 
+
+@app.route("/workflow", methods=["GET"])
+def get_workflow():
+    conn = sqlite3.connect(DATABASE_PATH)
+    try:
+        cards = [
+            dict(row)
+            for row in conn.execute("""
+                SELECT id, name, created_at, updated_at
+                FROM workflow_cards
+                ORDER BY id
+            """).fetchall()
+        ]
+
+        assignments = {
+            row["order_id"]: row["card_id"]
+            for row in conn.execute("""
+                SELECT order_id, card_id
+                FROM workflow_assignments
+            """).fetchall()
+        }
+
+        return jsonify({
+            "cards": cards,
+            "assignments": assignments
+        })
+    finally:
+        conn.close()
+
+
+@app.route("/workflow/cards", methods=["POST"])
+def create_workflow_card():
+    data = request.get_json(silent=True) or {}
+    name = str(data.get("name") or "").strip()
+
+    if not name:
+        return jsonify({"error": "Card name is required."}), 400
+
+    conn = sqlite3.connect(DATABASE_PATH)
+    try:
+        cursor = conn.execute(
+            "INSERT INTO workflow_cards (name) VALUES (?)",
+            (name,)
+        )
+        conn.commit()
+
+        return jsonify({
+            "id": cursor.lastrowid,
+            "name": name
+        }), 201
+    except sqlite3.IntegrityError:
+        return jsonify({"error": "A card with that name already exists."}), 409
+    finally:
+        conn.close()
+
+
+@app.route("/workflow/cards/<int:card_id>", methods=["PUT"])
+def rename_workflow_card(card_id):
+    data = request.get_json(silent=True) or {}
+    name = str(data.get("name") or "").strip()
+
+    if not name:
+        return jsonify({"error": "Card name is required."}), 400
+
+    conn = sqlite3.connect(DATABASE_PATH)
+    try:
+        cursor = conn.execute("""
+            UPDATE workflow_cards
+            SET name = ?, updated_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+        """, (name, card_id))
+
+        if cursor.rowcount == 0:
+            conn.rollback()
+            return jsonify({"error": "Card not found."}), 404
+
+        conn.commit()
+        return jsonify({"id": card_id, "name": name})
+    except sqlite3.IntegrityError:
+        return jsonify({"error": "A card with that name already exists."}), 409
+    finally:
+        conn.close()
+
+
+@app.route("/workflow/cards/<int:card_id>", methods=["DELETE"])
+def delete_workflow_card(card_id):
+    conn = sqlite3.connect(DATABASE_PATH)
+    try:
+        conn.execute("""
+            UPDATE workflow_assignments
+            SET card_id = NULL, updated_at = CURRENT_TIMESTAMP
+            WHERE card_id = ?
+        """, (card_id,))
+
+        cursor = conn.execute(
+            "DELETE FROM workflow_cards WHERE id = ?",
+            (card_id,)
+        )
+
+        if cursor.rowcount == 0:
+            conn.rollback()
+            return jsonify({"error": "Card not found."}), 404
+
+        conn.commit()
+        return jsonify({"success": True})
+    finally:
+        conn.close()
+
+
+@app.route("/workflow/assignments", methods=["PUT"])
+def update_workflow_assignment():
+    data = request.get_json(silent=True) or {}
+    order_id = str(data.get("order_id") or "").strip()
+    card_id = data.get("card_id")
+
+    if not order_id:
+        return jsonify({"error": "order_id is required."}), 400
+
+    if card_id == "":
+        card_id = None
+
+    conn = sqlite3.connect(DATABASE_PATH)
+    try:
+        if card_id is not None:
+            try:
+                card_id = int(card_id)
+            except (TypeError, ValueError):
+                return jsonify({"error": "Invalid card_id."}), 400
+
+            card = conn.execute(
+                "SELECT id FROM workflow_cards WHERE id = ?",
+                (card_id,)
+            ).fetchone()
+
+            if card is None:
+                return jsonify({"error": "Card not found."}), 404
+
+        conn.execute("""
+            INSERT INTO workflow_assignments (order_id, card_id)
+            VALUES (?, ?)
+            ON CONFLICT(order_id) DO UPDATE SET
+                card_id = excluded.card_id,
+                updated_at = CURRENT_TIMESTAMP
+        """, (order_id, card_id))
+
+        conn.commit()
+        return jsonify({
+            "success": True,
+            "order_id": order_id,
+            "card_id": card_id
+        })
+    finally:
+        conn.close()
+
 initialize_database()
+initialize_workflow_tables()
 
 if __name__=="__main__":app.run(host="0.0.0.0",port=5000)

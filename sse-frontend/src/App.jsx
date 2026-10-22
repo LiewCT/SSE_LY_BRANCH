@@ -13,6 +13,9 @@ const APPROVE_ORDER_API_URL = `${API_BASE_URL}/approve-order`;
 const COMBINE_ORDERS_API_URL = `${API_BASE_URL}/combine-orders`;
 const REMOVE_ORDER_API_URL = `${API_BASE_URL}/remove-order`;
 const MOVE_PRODUCT_API_URL = `${API_BASE_URL}/move-product`;
+const WORKFLOW_API_URL = `${API_BASE_URL}/workflow`;
+const WORKFLOW_CARDS_API_URL = `${API_BASE_URL}/workflow/cards`;
+const WORKFLOW_ASSIGNMENTS_API_URL = `${API_BASE_URL}/workflow/assignments`;
 const POLL_INTERVAL_MS = 3000;
 const CARD_HEIGHT_PX = 450;
 const AUTO_SCROLL_EDGE_PX = 90;
@@ -85,25 +88,8 @@ const getProductPackagingLabel=(item,packedValue=item?.packedQuantity)=>{
   return `${packed}/${total} Ongoing`;
 };
 
-// Normal grid: New, Trip, Hold. Fixed at bottom: Send Now.
-const ORDER_SECTIONS = [
-  {
-    title: "New",
-    type: "new"
-  },
-  {
-    title: "Trip",
-    type: "trip"
-  },
-  {
-    title: "Hold",
-    type: "hold"
-  },
-  {
-    title: "Send Now",
-    type: "send_now"
-  }
-];
+// Orders are grouped by shared workflow assignments from the backend.
+const NEW_ORDERS_SECTION = { title: "New Orders", type: "new_orders", cardId: null };
 const getSavedObject = (storageKey) => {
   try {
     return JSON.parse(localStorage.getItem(storageKey)) || {};
@@ -400,6 +386,11 @@ function App() {
   const [currentPage,setCurrentPage]=useState(getPageFromPath);
   const [navigationState,setNavigationState]=useState(()=>window.history.state||{});
   const [orders, setOrders] = useState([]);
+  const [workflowCards, setWorkflowCards] = useState([]);
+  const [workflowAssignments, setWorkflowAssignments] = useState({});
+  const [newWorkflowCardName, setNewWorkflowCardName] = useState("");
+  const [workflowBusy, setWorkflowBusy] = useState(false);
+  const [workflowError, setWorkflowError] = useState("");
   const [openRows, setOpenRows] = useState([]);
   const [newOrderIds, setNewOrderIds] = useState([]);
   const [loading, setLoading] = useState(true);
@@ -501,6 +492,92 @@ const playNotificationSound=useCallback(()=>{
   audio.currentTime=0;
   audio.play().catch(error=>console.warn("Notification sound blocked",error));
 },[]);
+
+  const normalizeWorkflowAssignments = (rawAssignments) => {
+    if (Array.isArray(rawAssignments)) {
+      return Object.fromEntries(rawAssignments.map((item) => [String(item.order_id), item.card_id == null ? null : Number(item.card_id)]));
+    }
+    if (rawAssignments && typeof rawAssignments === "object") {
+      return Object.fromEntries(Object.entries(rawAssignments).map(([orderId, value]) => [
+        String(orderId), value && typeof value === "object" ? (value.card_id == null ? null : Number(value.card_id)) : (value == null ? null : Number(value))
+      ]));
+    }
+    return {};
+  };
+
+  const fetchWorkflow = useCallback(async () => {
+    try {
+      const response = await axios.get(WORKFLOW_API_URL);
+      setWorkflowCards(Array.isArray(response.data?.cards) ? response.data.cards : []);
+      setWorkflowAssignments(normalizeWorkflowAssignments(response.data?.assignments));
+      setWorkflowError("");
+    } catch (error) {
+      console.error("Cannot load workflow cards", error);
+      setWorkflowError("Could not load shared workflow cards. Check the backend /workflow endpoint.");
+    }
+  }, []);
+
+  useEffect(() => {
+    if (!['packaging', 'mobile-scanner'].includes(currentPage)) return undefined;
+    fetchWorkflow();
+    // Keep cards and assignments in sync when another device changes the workflow.
+    const workflowInterval = setInterval(fetchWorkflow, POLL_INTERVAL_MS);
+    return () => clearInterval(workflowInterval);
+  }, [currentPage, fetchWorkflow]);
+
+  const assignOrderToCard = async (orderId, cardId) => {
+    const key = String(orderId);
+    const previousAssignments = workflowAssignments;
+    setWorkflowAssignments((current) => ({ ...current, [key]: cardId == null ? null : Number(cardId) }));
+    try {
+      await axios.put(WORKFLOW_ASSIGNMENTS_API_URL, { order_id: key, card_id: cardId == null ? null : Number(cardId) });
+      setWorkflowError("");
+    } catch (error) {
+      console.error("Cannot save order assignment", error);
+      setWorkflowAssignments(previousAssignments);
+      setWorkflowError("Could not save that order move. Please try again.");
+      window.alert("The order move was not saved to the server. Please try again.");
+    }
+  };
+
+  const createWorkflowCard = async (event) => {
+    event?.preventDefault?.();
+    const name = newWorkflowCardName.trim();
+    if (!name || workflowBusy) return;
+    setWorkflowBusy(true);
+    setWorkflowError("");
+    try {
+      await axios.post(WORKFLOW_CARDS_API_URL, { name });
+      setNewWorkflowCardName("");
+      await fetchWorkflow();
+    } catch (error) {
+      console.error("Cannot create workflow card", error);
+      setWorkflowError(error.response?.data?.error || "Could not create card. Card names must be unique.");
+    } finally { setWorkflowBusy(false); }
+  };
+
+  const renameWorkflowCard = async (card) => {
+    const name = window.prompt("Rename card", card.name);
+    if (name == null || !name.trim() || name.trim() === card.name) return;
+    try {
+      await axios.put(`${WORKFLOW_CARDS_API_URL}/${card.id}`, { name: name.trim() });
+      await fetchWorkflow();
+    } catch (error) {
+      console.error("Cannot rename workflow card", error);
+      setWorkflowError(error.response?.data?.error || "Could not rename card. Card names must be unique.");
+    }
+  };
+
+  const deleteWorkflowCard = async (card) => {
+    if (!window.confirm(`Delete the \"${card.name}\" card? Its orders will return to New Orders.`)) return;
+    try {
+      await axios.delete(`${WORKFLOW_CARDS_API_URL}/${card.id}`);
+      await fetchWorkflow();
+    } catch (error) {
+      console.error("Cannot delete workflow card", error);
+      setWorkflowError(error.response?.data?.error || "Could not delete card.");
+    }
+  };
 
   // Keep an optimistic value while the PUT request is running to prevent polling from changing the button back.
   const pendingPackagingRef = useRef(new Map());
@@ -648,18 +725,19 @@ const playNotificationSound=useCallback(()=>{
       clearInterval(intervalId);
     };
   }, [currentPage, fetchApprovals]);
-  // Build each card while keeping the card order fixed.
+  // The first column is always New Orders; the remaining cards are user-managed and shared.
   const orderSectionsWithOrders = useMemo(() => {
-    return ORDER_SECTIONS.map((section) => {
-      const sectionOrders = orders.filter(
-        (order) => getResolvedOrderType(order) === section.type
-      );
-      return {
-        ...section,
-        orders: sectionOrders
-      };
-    });
-  }, [orders]);
+    const sections = [NEW_ORDERS_SECTION, ...workflowCards.map((card) => ({
+      title: card.name, type: `workflow_${card.id}`, cardId: Number(card.id), workflowCard: card
+    }))];
+    return sections.map((section) => ({
+      ...section,
+      orders: orders.filter((order) => {
+        const assignedCardId = workflowAssignments[String(order.id)];
+        return section.cardId == null ? assignedCardId == null : Number(assignedCardId) === Number(section.cardId);
+      })
+    }));
+  }, [orders, workflowCards, workflowAssignments]);
   const markOrderAsSeen = (orderId) => {
     setNewOrderIds((currentNewIds) =>
       currentNewIds.filter((id) => id !== orderId)
@@ -833,14 +911,7 @@ const playNotificationSound=useCallback(()=>{
     return packed>=total?"packaged-status":"ongoing-status";
   };
   const isOrderFullyPackaged=order=>Boolean(order?.items?.length)&&order.items.every(isItemFullyPackaged);
-  const canDropIntoSection = (order, targetType) => {
-    // New, Trip and Hold accept any order.
-    if (targetType !== "send_now") {
-      return true;
-    }
-    // Send Now only accepts fully packaged orders.
-    return isOrderFullyPackaged(order);
-  };
+  const canDropIntoSection = () => true;
   const approveOrder = async (order) => {
     if (!order || !isOrderFullyPackaged(order)) {
       return;
@@ -951,9 +1022,8 @@ const playNotificationSound=useCallback(()=>{
       if(response.data?.status!==true)throw new Error(response.data?.message||"The server did not confirm the product move.");
       const targetSaleId=String(response.data.target_sale_id||"");
       if(destination.type==="new_order"&&targetSaleId){
-        const overrides=getSavedObject(ORDER_TYPE_STORAGE_KEY);
-        overrides[targetSaleId]=destination.targetType;
-        saveObject(ORDER_TYPE_STORAGE_KEY,overrides);
+        await axios.put(WORKFLOW_ASSIGNMENTS_API_URL,{order_id:targetSaleId,card_id:destination.cardId==null?null:Number(destination.cardId)});
+        setWorkflowAssignments(current=>({...current,[targetSaleId]:destination.cardId==null?null:Number(destination.cardId)}));
       }
       const targetLabel=destination.type==="existing_order"?`Order ${destination.targetOrder.id}`:`new Order ${targetSaleId}`;
       const warning=response.data.warning?` ${response.data.warning}`:"";
@@ -1108,47 +1178,22 @@ const playNotificationSound=useCallback(()=>{
     event.dataTransfer.dropEffect = "move";
     setDragOverSection(sectionType);
   };
-  const handleDrop = async (event, targetType) => {
+  const handleDrop = async (event, targetSection) => {
     event.preventDefault();
     const productDrag=readDraggedProduct(event.dataTransfer);
     if(productDrag){
       event.stopPropagation();
       resetDragState();
-      moveDraggedProduct(productDrag,{type:"new_order",targetType});
+      moveDraggedProduct(productDrag,{type:"new_order",cardId:targetSection.cardId});
       return;
     }
-    const orderId =
-      event.dataTransfer.getData("text/plain") || draggingOrderId;
-    if (!orderId) {
-      resetDragState();
-      return;
-    }
-    const selectedOrder = orders.find((order) => order.id === orderId);
-    if (!selectedOrder) {
-      resetDragState();
-      return;
-    }
-    // Block unpackaged orders from entering Send Now.
-    if (!canDropIntoSection(selectedOrder, targetType)) {
-      resetDragState();
-      return;
-    }
-    const currentType = getResolvedOrderType(selectedOrder);
-    if (currentType !== targetType) {
-      const savedOverrides = getSavedObject(ORDER_TYPE_STORAGE_KEY);
-      savedOverrides[orderId] = targetType;
-      saveObject(ORDER_TYPE_STORAGE_KEY, savedOverrides);
-      setOrders((currentOrders) =>
-        currentOrders.map((order) =>
-          order.id === orderId
-            ? {
-                ...order,
-                manualType: targetType
-              }
-            : order
-        )
-      );
-    }
+    const orderId = event.dataTransfer.getData("application/x-sale-order-id") || event.dataTransfer.getData("text/plain") || draggingOrderId;
+    if (!orderId) { resetDragState(); return; }
+    const selectedOrder = ordersRef.current.find((order) => order.id === orderId);
+    if (!selectedOrder) { resetDragState(); return; }
+    const targetCardId = targetSection.cardId == null ? null : Number(targetSection.cardId);
+    const currentCardId = workflowAssignments[String(orderId)] == null ? null : Number(workflowAssignments[String(orderId)]);
+    if (currentCardId !== targetCardId) await assignOrderToCard(orderId, targetCardId);
     resetDragState();
   };
   const removeOrderFromLocalStorage=orderId=>{
@@ -1227,14 +1272,9 @@ const playNotificationSound=useCallback(()=>{
       (order) => order.id === draggingOrderId
     );
     const draggedProductState=getDraggedProductState(draggingProduct);
-    const isBlockedSendNowTarget = Boolean(
-      draggingOrderId &&
-      section.type === "send_now" &&
-      draggedOrder &&
-      !isOrderFullyPackaged(draggedOrder)
-    );
-    const isSendNowSection = section.type === "send_now";
-    const tableColumnCount = isSendNowSection ? 4 : 3;
+    const isBlockedSendNowTarget = false;
+    const isSendNowSection = true;
+    const tableColumnCount = 4;
     return (
       <section
         className={`
@@ -1253,21 +1293,17 @@ const playNotificationSound=useCallback(()=>{
         }}
         key={section.type}
         onDragOver={(event) => handleDragOver(event, section.type)}
-        onDrop={(event) => handleDrop(event, section.type)}
+        onDrop={(event) => handleDrop(event, section)}
       >
         <div className="card-heading">
           <h1 className="section-title">{section.title}</h1>
           <div style={{display:"flex",alignItems:"center",gap:"8px"}}>
-            {isSendNowSection&&<button type="button" className="approval-button" disabled={isApprovingAll||!section.orders.some(order=>isOrderFullyPackaged(order)&&!approvingOrderIds.includes(order.id))} onClick={event=>{event.stopPropagation();approveAllOrders(section.orders);}}>{isApprovingAll?"Approving...":"Approve All"}</button>}
+            {section.workflowCard&&<><button type="button" title="Rename card" onClick={event=>{event.stopPropagation();renameWorkflowCard(section.workflowCard);}} style={{padding:"4px 7px",border:"1px solid #cbd5e1",borderRadius:"6px",background:"white",cursor:"pointer"}}>Rename</button><button type="button" title="Delete card" onClick={event=>{event.stopPropagation();deleteWorkflowCard(section.workflowCard);}} style={{padding:"4px 7px",border:"1px solid #fecaca",borderRadius:"6px",background:"#fff1f2",color:"#be123c",cursor:"pointer"}}>Delete</button></>}
+            <button type="button" className="approval-button" disabled={isApprovingAll||!section.orders.some(order=>isOrderFullyPackaged(order)&&!approvingOrderIds.includes(order.id))} onClick={event=>{event.stopPropagation();approveAllOrders(section.orders);}}>{isApprovingAll?"Approving...":"Approve All"}</button>
             <span className="order-count">{section.orders.length}</span>
           </div>
         </div>
-        {draggingProduct&&<div className="product-create-zone">＋ Drop here to create a new order</div>}
-        {isBlockedSendNowTarget && (
-          <div className="drop-warning">
-            Complete all packaging before moving the order to Send Now.
-          </div>
-        )}
+        {draggingProduct&&<div className="product-create-zone">＋ Drop here to create a new order in this card</div>}
         <div className="table-wrapper" style={{ flex: "1 1 auto", minHeight: 0, overflowY: "auto" }}>
           <table className="main-table">
             <thead>
@@ -1283,7 +1319,7 @@ const playNotificationSound=useCallback(()=>{
                 <tr className="empty-orders">
                   <td colSpan={tableColumnCount}>
                     {draggingProduct
-                      ? "Drop here to create a new order"
+                      ? "Drop here to create a new order in this card"
                       : draggingOrderId && !isBlockedSendNowTarget
                       ? `Drop order into ${section.title}`
                       : `No ${section.title} orders`}
@@ -1296,10 +1332,7 @@ const playNotificationSound=useCallback(()=>{
                   const isNew = newOrderIds.includes(order.id);
                   const isDragging = draggingOrderId === order.id;
                   const isApproving = approvingOrderIds.includes(order.id);
-                  const canApprove =
-                    isSendNowSection &&
-                    isOrderFullyPackaged(order) &&
-                    !isApproving;
+                  const canApprove = isOrderFullyPackaged(order) && !isApproving;
                   const hasMixedNineTech=hasMixedNineTechProducts(order);
                   const mergeEligibility=draggedOrder?getOrderMergeEligibility(draggedOrder,order):null;
                   const isMergeCandidate=Boolean(draggingOrderId&&order.id!==draggingOrderId);
@@ -1545,7 +1578,7 @@ const playNotificationSound=useCallback(()=>{
         <div>
           <h2>Packaging Queue</h2>
           <p className="page-description">
-            Click an order to expand it. Click or scan to pack; drag a product to move it.
+            Click an order to expand it. Click or scan to pack; drag orders between cards or drag a product to create an order.
           </p>
         </div>
         <div className="header-actions header-three-sections">
@@ -1590,7 +1623,13 @@ const playNotificationSound=useCallback(()=>{
         </div>
       </div>
       {productMoveNotice&&<div className={`product-move-notice ${productMoveNotice.type}`} role="status" aria-live="polite">{productMoveNotice.message}</div>}
-      <div className="card-grid">
+      <form onSubmit={createWorkflowCard} style={{display:"flex",flexWrap:"wrap",alignItems:"center",gap:"8px",margin:"12px 0 16px",padding:"12px",background:"#f8fafc",border:"1px solid #cbd5e1",borderRadius:"10px"}}>
+        <strong style={{marginRight:"4px"}}>Create workflow card</strong>
+        <input value={newWorkflowCardName} onChange={event=>setNewWorkflowCardName(event.target.value)} placeholder="Card name (e.g. Delivery Route A)" maxLength={80} style={{flex:"1 1 240px",minWidth:0,padding:"9px 11px",border:"1px solid #cbd5e1",borderRadius:"7px"}} />
+        <button type="submit" disabled={workflowBusy||!newWorkflowCardName.trim()} style={{padding:"9px 14px",border:0,borderRadius:"7px",background:"#0f766e",color:"white",fontWeight:800,cursor:"pointer"}}>{workflowBusy?"Creating...":"＋ Add Card"}</button>
+        {workflowError&&<div role="alert" style={{flexBasis:"100%",color:"#b91c1c",fontSize:"13px"}}>{workflowError}</div>}
+      </form>
+      <div className="card-grid" style={{display:"grid",gridTemplateColumns:"repeat(auto-fit, minmax(min(100%, 420px), 1fr))",gap:"16px",alignItems:"start"}}>
         {orderSectionsWithOrders.map(renderOrderCard)}
       </div>
       {removeDialog&&<div className="remove-modal-backdrop" role="presentation">

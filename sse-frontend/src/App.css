@@ -251,3 +251,34 @@ h2 {margin:0;font-size:32px;}
   .remove-actions button {flex:1;}
 }
 
+/* Remove the old fixed "New" section styling.
+   Append this to the end of App.css. Header buttons are unaffected because
+   their styles are defined separately in App.jsx. */
+.order-card.new {
+  border-color: #dddddd;
+}
+.order-card.new .card-heading {
+  background: #f3f4f6;
+  color: #222222;
+}
+.order-card.new .table-wrapper {
+  background: #ffffff;
+}
+.order-card.new .main-table > thead > tr > th {
+  background: #e5e7eb;
+  color: #222222;
+}
+.order-row.new > td,
+.detail.new > td {
+  background: #ffffff;
+}
+
+/* Remove the old pulsing highlight and badge used for newly created orders. */
+.order-row.is-new {
+  animation: none;
+  filter: none;
+  box-shadow: none;
+}
+.new-badge {
+  display: none;
+}
