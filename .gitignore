@@ -1,0 +1,10 @@
+.env
+/venv
+
+# SQLite databases
+*.db
+*.db-shm
+*.db-wal
+
+.csv
+attendance.*
