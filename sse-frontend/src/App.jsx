@@ -5,7 +5,7 @@ import PwaInstallButton from "./PwaInstallButton";
 import CreditNoteReport from "./CreditNoteReport";
 import OpenInvoice from "./OpenInvoice";
 import StockRequestPage from "./StockRequestPage";
-const API_BASE_URL = "https://sse-sales-check.onrender.com";
+const API_BASE_URL = "https://sse-ly-branch.onrender.com";
 // const API_BASE_URL = "http://localhost:5000";
 const APPROVALS_API_URL = `${API_BASE_URL}/approvals`;
 const PACKAGING_STATUS_API_URL = `${API_BASE_URL}/packaging-status`;
